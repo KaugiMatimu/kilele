@@ -1,0 +1,30 @@
+{% extends "admin/base_site.html" %}
+
+{% block title %}{{ title }} | {{ site_title|default:_('Django site admin') }}{% endblock %}
+
+{% block content %}
+  <div class="dashboard-container">
+    <section class="dashboard-header">
+      <h1>{{ title }}</h1>
+      <p>Welcome back, {{ user.get_full_name|default:user.email }}.</p>
+    </section>
+
+    <section class="dashboard-metrics">
+      {% for metric in metrics %}
+        <div class="dashboard-card">
+          <p class="metric-label">{{ metric.label }}</p>
+          <p class="metric-value">{{ metric.value }}</p>
+        </div>
+      {% endfor %}
+    </section>
+
+    <section class="dashboard-menu">
+      <h2>Admin Navigation</h2>
+      <div class="dashboard-links">
+        {% for item in section_menu %}
+          <a class="dashboard-link" href="{{ item.url }}">{{ item.title }}</a>
+        {% endfor %}
+      </div>
+    </section>
+  </div>
+{% endblock %}

@@ -1,0 +1,108 @@
+{% extends "admin/base.html" %}
+
+{% block title %}{{ site_title|default:_('Django site admin') }}{% endblock %}
+
+{% block branding %}
+<h1 id="site-name"><a href="{{ site_url|default:'#' }}">{{ site_header|default:_('Django administration') }}</a></h1>
+{% endblock %}
+
+{% block nav-global %}
+<div class="header-nav">
+  <div class="header-links">
+    <a href="{{ site_url|default:'#' }}">Dashboard</a>
+    <a href="{{ app_list.0.models.0.admin_url|default:'#' }}">Site Admin</a>
+  </div>
+</div>
+{% endblock %}
+
+{% block extrahead %}
+  {{ block.super }}
+  <style>
+    .dashboard-container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 2rem 1rem;
+      font-family: Inter, system-ui, sans-serif;
+    }
+    .dashboard-header h1 {
+      font-size: 2.5rem;
+      margin-bottom: 0.5rem;
+      color: #0f1724;
+    }
+    .dashboard-header p {
+      color: #475569;
+      font-size: 1rem;
+      margin-bottom: 1.5rem;
+    }
+    .dashboard-metrics {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 1rem;
+      margin-bottom: 2rem;
+    }
+    .dashboard-card {
+      padding: 1.5rem;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 1rem;
+    }
+    .metric-label {
+      color: #64748b;
+      text-transform: uppercase;
+      font-size: 0.75rem;
+      letter-spacing: 0.12em;
+      margin-bottom: 0.5rem;
+    }
+    .metric-value {
+      font-size: 2rem;
+      font-weight: 700;
+      color: #0f1724;
+    }
+    .dashboard-menu {
+      padding: 1.5rem;
+      background: #ffffff;
+      border: 1px solid #e2e8f0;
+      border-radius: 1rem;
+    }
+    .dashboard-menu h2 {
+      margin-bottom: 1rem;
+      color: #0f1724;
+      font-size: 1.25rem;
+    }
+    .dashboard-links {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 0.75rem;
+    }
+    .dashboard-link {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 3rem;
+      border-radius: 0.75rem;
+      padding: 0 1rem;
+      text-decoration: none;
+      background: #f8fafc;
+      color: #0f1724;
+      border: 1px solid #e2e8f0;
+      font-weight: 600;
+      transition: background-color 0.2s ease, border-color 0.2s ease;
+    }
+    .dashboard-link:hover {
+      background: #ecfdf5;
+      border-color: #a7f3d0;
+    }
+    .header-nav {
+      display: flex;
+      justify-content: flex-end;
+      gap: 1rem;
+      margin-bottom: 1rem;
+    }
+    .header-links a {
+      color: #0f1724;
+      font-weight: 600;
+      text-decoration: none;
+      padding: 0.5rem 0.75rem;
+    }
+  </style>
+{% endblock %}
