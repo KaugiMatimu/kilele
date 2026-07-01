@@ -1,8 +1,11 @@
 from rest_framework import serializers
 from contributions.models import (
     ContributionPlan, ShareProduct, DividendRule,
-    TransactionRecord, AuditLog, ContributionDeadline
+    TransactionRecord, AuditLog, ContributionDeadline, BusinessRule,
+    LedgerEntry, TransactionReversal
 )
+from loans.models import LoanProduct
+from notifications.models import NotificationTemplate
 
 
 class ContributionPlanDetailSerializer(serializers.ModelSerializer):
@@ -27,6 +30,25 @@ class ContributionDeadlineSerializer(serializers.ModelSerializer):
     class Meta:
         model = ContributionDeadline
         fields = ['id', 'name', 'due_date', 'description', 'active']
+
+
+class LoanProductAdminSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = LoanProduct
+        fields = ['id', 'name', 'description', 'min_amount', 'max_amount', 'interest_rate', 'duration_months', 'eligibility_criteria', 'active']
+
+
+class NotificationTemplateAdminSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = NotificationTemplate
+        fields = ['id', 'name', 'event_type', 'subject', 'body', 'active']
+
+
+class BusinessRuleSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = BusinessRule
+        fields = ['id', 'name', 'key', 'value', 'description', 'active', 'updated_at']
+        read_only_fields = ['updated_at']
 
 
 class TransactionRecordDetailSerializer(serializers.ModelSerializer):
@@ -68,3 +90,15 @@ class AuditLogSerializer(serializers.ModelSerializer):
         model = AuditLog
         fields = ['id', 'timestamp', 'user', 'user_email', 'action', 'content_object', 'extra_data']
         read_only_fields = ['timestamp']
+
+
+class LedgerEntrySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = LedgerEntry
+        fields = ['id', 'entry_type', 'amount', 'balance_after', 'note', 'created_at']
+
+
+class TransactionReversalSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TransactionReversal
+        fields = ['id', 'reversed_by', 'reason', 'reversed_at']

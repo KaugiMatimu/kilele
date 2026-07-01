@@ -4,9 +4,9 @@ from rest_framework.permissions import AllowAny
 from django.contrib.auth.tokens import default_token_generator
 from django.utils.http import urlsafe_base64_encode
 from django.utils.encoding import force_bytes
-from django.urls import reverse
 from django.conf import settings
-from django.core.mail import send_mail
+from django.core.mail import EmailMultiAlternatives
+from urllib.parse import urlencode
 
 from .serializers import AdminRegistrationSerializer, PasswordResetRequestSerializer, PasswordResetConfirmSerializer
 
@@ -41,20 +41,31 @@ class PasswordResetRequestView(generics.GenericAPIView):
 
         token = default_token_generator.make_token(user)
         uid = urlsafe_base64_encode(force_bytes(user.pk))
-        reset_url = f"{settings.FRONTEND_URL}/reset-password?uidb64={uid}&token={token}"
+        origin = request.headers.get('Origin') or settings.FRONTEND_URL
+        query_string = urlencode({'uidb64': uid, 'token': token})
+        reset_url = f"{origin.rstrip('/')}/reset-password?{query_string}"
 
-        # Send the password reset email.
+        # Send the password reset email with both text and HTML variants.
         subject = 'Reset your Kilele Ridge password'
-        message = (
+        text_message = (
             f'Hello {user.full_name},\n\n'
             f'Use the link below to reset your password:\n\n{reset_url}\n\n'
             'If you did not request a reset, please ignore this email.\n\n'
             'Thanks,\nKilele Ridge'
         )
+        html_message = (
+            f'<p>Hello {user.full_name},</p>'
+            f'<p>Use the link below to reset your password:</p>'
+            f'<p><a href="{reset_url}">{reset_url}</a></p>'
+            '<p>If you did not request a reset, please ignore this email.</p>'
+            '<p>Thanks,<br/>Kilele Ridge</p>'
+        )
         from_email = settings.DEFAULT_FROM_EMAIL
         recipient_list = [user.email]
         try:
-            send_mail(subject, message, from_email, recipient_list, fail_silently=False)
+            email = EmailMultiAlternatives(subject, text_message, from_email, recipient_list)
+            email.attach_alternative(html_message, 'text/html')
+            email.send(fail_silently=False)
             sent = True
         except Exception as exc:
             sent = False
@@ -62,13 +73,12 @@ class PasswordResetRequestView(generics.GenericAPIView):
 
         response_data = {
             'detail': 'Password reset request processed.',
-            'reset_url': reset_url,
+            'email_sent': sent,
         }
-        if sent:
-            response_data['email_sent'] = True
-        else:
+        if not sent:
             response_data['email_sent'] = False
             response_data['email_error'] = sent_error
+            response_data['reset_url'] = reset_url
             response_data['note'] = 'Email failed to send. Use the reset_url directly in dev.'
 
         return Response(response_data, status=status.HTTP_200_OK)

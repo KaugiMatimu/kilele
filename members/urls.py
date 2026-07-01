@@ -8,7 +8,8 @@ from members.views import (
     LoanApplicationViewSet,
     WorkflowRequestViewSet,
     MemberDashboardView,
-    StatementsExportView
+    StatementsExportView,
+    MemberReportSummaryView,
 )
 
 router = DefaultRouter(trailing_slash='/?')
@@ -23,9 +24,8 @@ urlpatterns = [
     path('', include(router.urls)),
     path('profile', MemberProfileView.as_view(), name='member-profile-no-slash'),
     path('profile/', MemberProfileView.as_view(), name='member-profile'),
-    path('contributions/', ContributionsHistoryView.as_view(), name='contributions-history'),
-    path('contributions/summary/', ContributionsHistoryView.as_view(), name='contributions-summary'),
     path('shares-balances/', SharesAndBalancesView.as_view(), name='shares-balances'),
     path('dashboard/', MemberDashboardView.as_view(), name='member-dashboard'),
     path('statements/export/', StatementsExportView.as_view(), name='statements-export'),
+    path('reports/summary/', MemberReportSummaryView.as_view(), name='member-report-summary'),
 ]

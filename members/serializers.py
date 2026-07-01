@@ -111,7 +111,7 @@ class TransactionRecordSerializer(serializers.ModelSerializer):
     class Meta:
         model = TransactionRecord
         fields = ['id', 'transaction_type', 'transaction_type_display', 'amount', 'reference', 'created_at', 'notes']
-        read_only_fields = ['created_at']
+        read_only_fields = ['created_at', 'transaction_type']
 
 
 class ContributionPlanSerializer(serializers.ModelSerializer):
@@ -138,9 +138,15 @@ class LoanApplicationSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = LoanApplication
-        fields = ['id', 'product', 'product_name', 'amount', 'term_months', 'purpose', 
-                  'status', 'status_display', 'submitted_at', 'reviewed_at', 'notes']
-        read_only_fields = ['submitted_at', 'reviewed_at', 'status', 'notes']
+        fields = [
+            'id', 'product', 'product_name', 'amount', 'term_months', 'purpose',
+            'status', 'status_display', 'submitted_at', 'reviewed_at', 'approved_at',
+            'disbursed_at', 'disbursed_amount', 'rejection_reason', 'notes'
+        ]
+        read_only_fields = [
+            'submitted_at', 'reviewed_at', 'status', 'approved_at',
+            'disbursed_at', 'disbursed_amount', 'rejection_reason', 'notes'
+        ]
 
 
 class LoanApplicationCreateSerializer(serializers.ModelSerializer):
@@ -155,11 +161,64 @@ class LoanApplicationCreateSerializer(serializers.ModelSerializer):
                 loan_product = LoanProduct.objects.get(id=product)
                 if value < loan_product.min_amount or value > loan_product.max_amount:
                     raise serializers.ValidationError(
-                        f"Amount must be between {loan_product.min_amount} and {loan_product.max_amount}"
+                        f"Amount must be between {loan_product.min_amount} and {loan_product.max_amount}."
                     )
             except LoanProduct.DoesNotExist:
-                pass
+                raise serializers.ValidationError('Selected loan product does not exist.')
         return value
+
+    def validate_term_months(self, value):
+        if value <= 0:
+            raise serializers.ValidationError('Term must be a positive number of months.')
+        product_id = self.initial_data.get('product')
+        if product_id:
+            try:
+                loan_product = LoanProduct.objects.get(id=product_id)
+                if value != loan_product.duration_months:
+                    raise serializers.ValidationError(
+                        f"Term must be exactly {loan_product.duration_months} months for this product."
+                    )
+            except LoanProduct.DoesNotExist:
+                raise serializers.ValidationError('Selected loan product does not exist.')
+        return value
+
+    def validate(self, attrs):
+        product = attrs.get('product')
+        amount = attrs.get('amount')
+        term_months = attrs.get('term_months')
+        request = self.context.get('request')
+
+        if not product:
+            raise serializers.ValidationError({'product': 'Loan product is required.'})
+
+        if not product.active:
+            raise serializers.ValidationError({'product': 'Selected loan product is not currently active.'})
+
+        if amount is None:
+            raise serializers.ValidationError({'amount': 'Loan amount is required.'})
+
+        if term_months is None:
+            raise serializers.ValidationError({'term_months': 'Loan term is required.'})
+
+        if request and hasattr(request, 'user'):
+            user = request.user
+            if getattr(user, 'member_profile', None) is None:
+                raise serializers.ValidationError('Member profile not found.')
+
+            member = user.member_profile
+            if member.status != 'active':
+                raise serializers.ValidationError('Only active members can apply for loans.')
+
+            existing = LoanApplication.objects.filter(
+                member=member,
+                status__in=['pending', 'approved', 'disbursed']
+            ).exists()
+            if existing:
+                raise serializers.ValidationError(
+                    'You already have an active or pending loan application. Please complete or wait for a decision before applying again.'
+                )
+
+        return attrs
 
 
 class WorkflowRequestSerializer(serializers.ModelSerializer):

@@ -1,4 +1,5 @@
 from pathlib import Path
+from corsheaders.defaults import default_headers, default_methods
 from decouple import config
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -107,7 +108,20 @@ SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 # CORS — allow Next.js dev server
 CORS_ALLOWED_ORIGINS = [
     'http://localhost:3000',
+    'http://127.0.0.1:3000',
 ]
+CORS_ALLOW_ALL_ORIGINS = DEBUG
+CORS_ALLOW_METHODS = list(default_methods) + [
+    'PATCH',
+]
+CORS_ALLOW_HEADERS = list(default_headers) + [
+    'authorization',
+]
+CORS_EXPOSE_HEADERS = [
+    'Content-Type',
+    'Authorization',
+]
+CORS_ALLOW_CREDENTIALS = True
 
 AUTH_USER_MODEL = 'users.User'  # We'll use a custom user model
 ROOT_URLCONF = 'core.urls'
@@ -144,4 +158,6 @@ REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ),
+    'DEFAULT_CONTENT_NEGOTIATION_CLASS': 'core.negotiation.IgnoreUnsupportedFormatContentNegotiation',
+    'URL_FORMAT_OVERRIDE': None,
 }

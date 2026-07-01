@@ -1,7 +1,7 @@
 from django.contrib import admin
 
 from core.admin import custom_admin_site
-from .models import LoanProduct, InterestRateRule, PenaltyRule, LoanApplication, LoanPayment
+from .models import LoanProduct, InterestRateRule, PenaltyRule, PaymentAllocationRule, LoanApplication, LoanPayment
 
 
 class InterestRateRuleInline(admin.TabularInline):
@@ -21,11 +21,17 @@ class LoanPaymentInline(admin.TabularInline):
     readonly_fields = ('penalty_accrued', 'days_overdue')
 
 
+class PaymentAllocationRuleInline(admin.TabularInline):
+    model = PaymentAllocationRule
+    extra = 0
+    fields = ('name', 'allocation_order', 'active')
+
+
 class LoanProductAdmin(admin.ModelAdmin):
     list_display = ('name', 'min_amount', 'max_amount', 'interest_rate', 'duration_months', 'active')
     search_fields = ('name',)
     list_filter = ('active', 'duration_months')
-    inlines = (InterestRateRuleInline, PenaltyRuleInline)
+    inlines = (InterestRateRuleInline, PenaltyRuleInline, PaymentAllocationRuleInline)
 
 
 class LoanApplicationAdmin(admin.ModelAdmin):

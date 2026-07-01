@@ -45,6 +45,7 @@ class CustomAdminSite(AdminSite):
                 {'title': 'Contribution Plans', 'url': '/admin/contributions/contributionplan/'},
                 {'title': 'Loan Products', 'url': '/admin/loans/loanproduct/'},
                 {'title': 'Notification Templates', 'url': '/admin/notifications/notificationtemplate/'},
+                {'title': 'Business Rules', 'url': '/admin/contributions/businessrule/'},
                 {'title': 'Website Content', 'url': '/admin/notifications/websitecontent/'},
                 {'title': 'Audit Logs', 'url': '/admin/contributions/auditlog/'},
             ]

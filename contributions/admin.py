@@ -1,7 +1,7 @@
 from django.contrib import admin
 
 from core.admin import custom_admin_site
-from .models import ContributionPlan, ShareProduct, ContributionDeadline, DividendRule, TransactionRecord, AuditLog
+from .models import ContributionPlan, ShareProduct, ContributionDeadline, DividendRule, TransactionRecord, AuditLog, BusinessRule
 
 
 class ContributionPlanAdmin(admin.ModelAdmin):
@@ -35,6 +35,12 @@ class TransactionRecordAdmin(admin.ModelAdmin):
     raw_id_fields = ('member',)
 
 
+class BusinessRuleAdmin(admin.ModelAdmin):
+    list_display = ('name', 'key', 'active', 'updated_at')
+    search_fields = ('name', 'key')
+    list_filter = ('active',)
+
+
 class AuditLogAdmin(admin.ModelAdmin):
     list_display = ('timestamp', 'user', 'action', 'content_object')
     search_fields = ('user__email', 'action', 'content_object')
@@ -46,5 +52,6 @@ custom_admin_site.register(ContributionPlan, ContributionPlanAdmin)
 custom_admin_site.register(ShareProduct, ShareProductAdmin)
 custom_admin_site.register(ContributionDeadline, ContributionDeadlineAdmin)
 custom_admin_site.register(DividendRule, DividendRuleAdmin)
+custom_admin_site.register(BusinessRule, BusinessRuleAdmin)
 custom_admin_site.register(TransactionRecord, TransactionRecordAdmin)
 custom_admin_site.register(AuditLog, AuditLogAdmin)

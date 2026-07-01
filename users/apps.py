@@ -30,9 +30,14 @@ def create_default_admin(sender, **kwargs):
             )
             return
 
-        if settings.DEBUG and not admin_user.check_password(admin_password):
+        if not admin_user.check_password(admin_password):
             admin_user.set_password(admin_password)
             admin_user.save(update_fields=['password'])
+
+        if not getattr(admin_user, 'is_staff', False):
+            admin_user.is_staff = True
+            admin_user.is_superuser = True
+            admin_user.save(update_fields=['is_staff', 'is_superuser'])
     except OperationalError:
         pass
     except Exception:

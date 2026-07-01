@@ -4,10 +4,105 @@ from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from django.db.models import Sum, Q
 from django.http import FileResponse
-from io import BytesIO
+from django.core.exceptions import ObjectDoesNotExist
+from io import BytesIO, StringIO
 from datetime import datetime, timedelta, date
 from decimal import Decimal
 import csv
+
+
+def _render_statement_xlsx(member, transactions):
+    try:
+        from openpyxl import Workbook
+    except ImportError:
+        raise ImportError('openpyxl is required to export statements as Excel. Install openpyxl.')
+
+    output = BytesIO()
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = 'Statement'
+    headers = ['Date', 'Type', 'Amount', 'Reference', 'Notes']
+    sheet.append(headers)
+
+    for txn in transactions:
+        sheet.append([
+            txn.created_at.strftime('%Y-%m-%d'),
+            txn.get_transaction_type_display(),
+            str(txn.amount),
+            txn.reference,
+            txn.notes,
+        ])
+
+    for col in sheet.columns:
+        max_length = 0
+        column = col[0].column_letter
+        for cell in col:
+            if cell.value is not None:
+                max_length = max(max_length, len(str(cell.value)))
+        sheet.column_dimensions[column].width = min(max_length + 2, 50)
+
+    workbook.save(output)
+    output.seek(0)
+    return output
+
+
+def _render_statement_pdf(member, transactions):
+    try:
+        from reportlab.lib.pagesizes import letter
+        from reportlab.pdfgen import canvas
+        from reportlab.lib.units import inch
+    except ImportError:
+        raise ImportError('reportlab is required to export statements as PDF. Install reportlab.')
+
+    output = BytesIO()
+    c = canvas.Canvas(output, pagesize=letter)
+    width, height = letter
+    margin = inch
+    y = height - margin
+
+    c.setFont('Helvetica-Bold', 14)
+    c.drawString(margin, y, f'Statement for {member.user.full_name} ({member.member_number})')
+    y -= 0.3 * inch
+
+    c.setFont('Helvetica', 10)
+    c.drawString(margin, y, f'Generated: {datetime.now().strftime("%Y-%m-%d")}')
+    y -= 0.4 * inch
+
+    headers = ['Date', 'Type', 'Amount', 'Reference', 'Notes']
+    c.setFont('Helvetica-Bold', 9)
+    x_positions = [margin, margin + 1.7 * inch, margin + 3.3 * inch, margin + 4.3 * inch, margin + 5.4 * inch]
+    for idx, header in enumerate(headers):
+        c.drawString(x_positions[idx], y, header)
+    y -= 0.25 * inch
+    c.setFont('Helvetica', 9)
+
+    for txn in transactions:
+        if y < margin + 0.5 * inch:
+            c.showPage()
+            y = height - margin
+            c.setFont('Helvetica-Bold', 9)
+            for idx, header in enumerate(headers):
+                c.drawString(x_positions[idx], y, header)
+            y -= 0.25 * inch
+            c.setFont('Helvetica', 9)
+
+        row = [
+            txn.created_at.strftime('%Y-%m-%d'),
+            txn.get_transaction_type_display(),
+            str(txn.amount),
+            txn.reference,
+            txn.notes,
+        ]
+        for idx, value in enumerate(row):
+            text = str(value) if value is not None else ''
+            if idx == 4 and len(text) > 40:
+                text = text[:37] + '...'
+            c.drawString(x_positions[idx], y, text)
+        y -= 0.22 * inch
+
+    c.save()
+    output.seek(0)
+    return output
 
 from members.models import Member, Branch, WorkflowRequest
 from contributions.models import TransactionRecord, ContributionPlan, ShareProduct, DividendRule
@@ -20,6 +115,7 @@ from members.serializers import (
     UserProfileUpdateSerializer,
     TransactionRecordSerializer,
     ContributionPlanSerializer, ShareProductSerializer,
+    LoanProductSerializer,
     LoanApplicationSerializer, LoanApplicationCreateSerializer,
     WorkflowRequestSerializer, WorkflowRequestCreateSerializer,
     MemberDashboardSerializer
@@ -31,7 +127,28 @@ class MemberPermission(IsAuthenticated):
     def has_permission(self, request, view):
         if not super().has_permission(request, view):
             return False
-        return hasattr(request.user, 'member_profile')
+
+        try:
+            return request.user.member_profile is not None
+        except ObjectDoesNotExist:
+            return False
+        except AttributeError:
+            return False
+
+
+class MemberOrStaffPermission(IsAuthenticated):
+    """Allow authenticated members or staff users to access loan workflows"""
+    def has_permission(self, request, view):
+        if not super().has_permission(request, view):
+            return False
+
+        user = request.user
+        try:
+            if user.is_staff or getattr(user, 'role', None) in ['admin', 'branch_manager', 'accountant']:
+                return True
+            return user.member_profile is not None
+        except (ObjectDoesNotExist, AttributeError):
+            return False
 
 
 class MemberRegistrationView(generics.CreateAPIView):
@@ -76,6 +193,64 @@ class MemberProfileView(generics.RetrieveUpdateAPIView):
             serializer.save()
             return Response(serializer.data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class MemberReportSummaryView(generics.GenericAPIView):
+    """Return a member-friendly report summary and allow download as CSV."""
+    permission_classes = [MemberPermission]
+
+    def get(self, request, *args, **kwargs):
+        member = request.user.member_profile
+
+        contributions = TransactionRecord.objects.filter(
+            member=member,
+            transaction_type='contribution'
+        ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+
+        shares = TransactionRecord.objects.filter(
+            member=member,
+            transaction_type='share_purchase'
+        ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+
+        withdrawals = TransactionRecord.objects.filter(
+            member=member,
+            transaction_type='withdrawal'
+        ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+
+        current_balance = contributions - withdrawals
+        def money(value):
+            return format(value.quantize(Decimal('0.01')), '.2f') if isinstance(value, Decimal) else format(Decimal(str(value)).quantize(Decimal('0.01')), '.2f')
+
+        summary = {
+            'contributions': money(contributions),
+            'shares': money(shares),
+            'withdrawals': money(withdrawals),
+            'current_balance': money(current_balance),
+        }
+
+        format_type = request.query_params.get('format', 'json').lower().strip().rstrip('/')
+        if format_type == 'csv':
+            output = BytesIO()
+            text_output = StringIO()
+            writer = csv.writer(text_output)
+            writer.writerow(['Metric', 'Value'])
+            writer.writerow(['Member Number', member.member_number])
+            writer.writerow(['Member Name', member.user.full_name])
+            writer.writerow(['Contributions', summary['contributions']])
+            writer.writerow(['Shares', summary['shares']])
+            writer.writerow(['Withdrawals', summary['withdrawals']])
+            writer.writerow(['Current Balance', summary['current_balance']])
+            output.write(text_output.getvalue().encode('utf-8'))
+            output.seek(0)
+            filename = f"report_summary_{member.member_number}_{datetime.now().strftime('%Y%m%d')}.csv"
+            return FileResponse(output, as_attachment=True, filename=filename, content_type='text/csv')
+
+        return Response({
+            'member_number': member.member_number,
+            'member_name': member.user.full_name,
+            'summary': summary,
+            'generated_at': datetime.now().isoformat(),
+        })
 
 
 class ContributionsHistoryView(generics.ListAPIView):
@@ -152,11 +327,17 @@ class SharesAndBalancesView(generics.ListAPIView):
 
 class LoanApplicationViewSet(viewsets.ModelViewSet):
     """Manage loan applications"""
-    permission_classes = [MemberPermission]
+    permission_classes = [MemberOrStaffPermission]
     
     def get_queryset(self):
-        member = self.request.user.member_profile
+        user = self.request.user
+        if self._is_staff_or_finance(user):
+            return LoanApplication.objects.all()
+        member = user.member_profile
         return LoanApplication.objects.filter(member=member)
+
+    def _is_staff_or_finance(self, user):
+        return user.is_staff or getattr(user, 'role', None) in ['admin', 'branch_manager', 'accountant']
 
     def get_serializer_class(self):
         if self.action == 'create':
@@ -178,152 +359,122 @@ class LoanApplicationViewSet(viewsets.ModelViewSet):
     def repayment_schedule(self, request, pk=None):
         """Get loan repayment schedule with payment history"""
         loan = self.get_object()
-        
-        # Calculate monthly payment
-        monthly_rate = (Decimal(str(loan.product.interest_rate)) / Decimal('100')) / Decimal('12')
-        n_payments = loan.term_months
-        principal = Decimal(str(loan.amount))
-        
-        if monthly_rate == 0:
-            monthly_payment = principal / Decimal(str(n_payments))
-        else:
-            numerator = monthly_rate * (1 + monthly_rate) ** n_payments
-            denominator = (1 + monthly_rate) ** n_payments - 1
-            monthly_payment = principal * numerator / denominator
-        
-        # Generate schedule with payment tracking
-        schedule = []
-        balance = principal
-        start_date = loan.submitted_at.date() if loan.submitted_at else date.today()
-        total_paid = Decimal('0')
-        total_penalty = Decimal('0')
-        
-        for month in range(1, n_payments + 1):
-            interest = balance * monthly_rate
-            principal_payment = monthly_payment - interest
-            balance -= principal_payment
-            due_date = start_date + timedelta(days=30*month)
-            
-            # Get payment record if it exists
-            payment_record = LoanPayment.objects.filter(
-                loan_application=loan,
-                month=month
-            ).first()
-            
-            # Calculate current penalty if overdue and not paid
-            penalty = Decimal('0')
-            days_overdue = 0
-            is_paid = False
-            amount_paid = Decimal('0')
-            paid_date = None
-            
-            if payment_record:
-                is_paid = payment_record.is_paid
-                amount_paid = payment_record.amount_paid
-                paid_date = payment_record.paid_date
-                penalty = payment_record.penalty_accrued
-                days_overdue = payment_record.days_overdue
-            else:
-                # Calculate dynamic penalty if overdue
-                days_overdue = get_days_overdue(due_date)
-                if days_overdue > 0:
-                    penalty_rules = list(loan.product.penalty_rules.filter(active=True).values(
-                        'name', 'penalty_amount', 'description'
-                    ))
-                    penalty = calculate_penalty_accrual(due_date, days_overdue, penalty_rules)
-            
-            if is_paid:
-                total_paid += amount_paid
-            
-            total_penalty += penalty
-            
-            schedule.append({
-                'month': month,
-                'due_date': str(due_date),
-                'principal': str(round(principal_payment, 2)),
-                'interest': str(round(interest, 2)),
-                'payment': str(round(monthly_payment, 2)),
-                'balance': str(round(max(Decimal('0'), balance), 2)),
-                'is_paid': is_paid,
-                'amount_paid': str(round(amount_paid, 2)),
-                'paid_date': str(paid_date) if paid_date else None,
-                'days_overdue': days_overdue,
-                'penalty_accrued': str(round(penalty, 2)),
-                'payment_status': 'paid' if is_paid else ('overdue' if days_overdue > 0 else 'pending')
-            })
-        
-        return Response({
-            'loan_id': loan.id,
-            'amount': str(loan.amount),
-            'interest_rate': str(loan.product.interest_rate),
-            'term_months': loan.term_months,
-            'monthly_payment': str(round(monthly_payment, 2)),
-            'total_paid': str(round(total_paid, 2)),
-            'total_penalty_accrued': str(round(total_penalty, 2)),
-            'schedule': schedule
-        })
+        return Response(loan.get_amortization_schedule())
 
     @action(detail=True, methods=['get'])
     def penalties(self, request, pk=None):
         """Return penalty and interest breakdown with accrued amounts"""
         loan = self.get_object()
-        product = loan.product
+        return Response(loan.get_penalty_summary())
 
-        # Get penalty and interest rules
-        penalty_rules = list(product.penalty_rules.filter(active=True).values('name', 'penalty_amount', 'description'))
-        interest_rules = list(product.interest_rules.filter(active=True).values('name', 'rate'))
-
-        # Calculate totals from payment records
-        monthly_rate = Decimal(str(product.interest_rate)) / Decimal('100') / Decimal('12')
-        outstanding_principal = Decimal(str(loan.amount))
-        
-        # Get all payments for this loan
-        payments = LoanPayment.objects.filter(loan_application=loan)
-        
-        total_accrued_penalty = payments.aggregate(total=Sum('penalty_accrued'))['total'] or Decimal('0')
-        total_paid = payments.aggregate(total=Sum('amount_paid'))['total'] or Decimal('0')
-        total_principal_paid = payments.filter(is_paid=True).aggregate(total=Sum('principal'))['total'] or Decimal('0')
-        
-        # Estimate monthly interest on remaining balance
-        remaining_balance = outstanding_principal - total_principal_paid
-        estimated_monthly_interest = remaining_balance * monthly_rate
-        
-        # Count overdue payments and accumulate dynamic penalties for missed installments
-        today = date.today()
-        overdue_payments = 0
-        unpaid_penalty = Decimal('0')
-        start_date = loan.submitted_at.date() if loan.submitted_at else today
-        penalty_rules = list(product.penalty_rules.filter(active=True).values('name', 'penalty_amount', 'description'))
-        
-        for month in range(1, loan.term_months + 1):
-            scheduled_due_date = start_date + timedelta(days=30 * month)
-            existing_payment = payments.filter(month=month).first()
-            due_date = existing_payment.due_date if existing_payment else scheduled_due_date
-            
-            if due_date < today and (not existing_payment or not existing_payment.is_paid):
-                overdue_payments += 1
-                days_overdue = get_days_overdue(due_date, today)
-                if days_overdue > 0:
-                    if not existing_payment:
-                        unpaid_penalty += calculate_penalty_accrual(due_date, days_overdue, penalty_rules)
-                    elif not existing_payment.is_paid and existing_payment.penalty_accrued == Decimal('0'):
-                        unpaid_penalty += calculate_penalty_accrual(due_date, days_overdue, penalty_rules)
-        
-        total_accrued_penalty = total_accrued_penalty + unpaid_penalty
-        
+    @action(detail=True, methods=['get'])
+    def history(self, request, pk=None):
+        """Return loan history and status changes"""
+        loan = self.get_object()
         return Response({
             'loan_id': loan.id,
-            'product': product.name,
-            'outstanding_principal': str(round(outstanding_principal, 2)),
-            'total_paid': str(round(total_paid, 2)),
-            'remaining_balance': str(round(remaining_balance, 2)),
-            'interest_rate': str(product.interest_rate),
-            'estimated_monthly_interest': str(round(estimated_monthly_interest, 2)),
-            'total_accrued_penalty': str(round(total_accrued_penalty, 2)),
-            'unpaid_overdue_penalty': str(round(unpaid_penalty, 2)),
-            'overdue_payment_count': overdue_payments,
-            'penalty_rules': penalty_rules,
-            'interest_rules': interest_rules,
+            'status': loan.status,
+            'submitted_at': loan.submitted_at,
+            'reviewed_by': loan.reviewed_by.full_name if loan.reviewed_by else None,
+            'reviewed_at': loan.reviewed_at,
+            'approved_at': loan.approved_at,
+            'disbursed_by': loan.disbursed_by.full_name if loan.disbursed_by else None,
+            'disbursed_at': loan.disbursed_at,
+            'rejection_reason': loan.rejection_reason,
+            'notes': loan.notes,
+        })
+
+    @action(detail=True, methods=['post'])
+    def record_payment(self, request, pk=None):
+        """Record a loan payment and allocate the amount according to configurable business rules."""
+        loan = self.get_object()
+        if loan.status != 'disbursed':
+            return Response({'detail': 'Payments can only be recorded for disbursed loans.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        data = request.data
+        amount = data.get('amount_paid') or data.get('amount')
+        if amount is None:
+            return Response({'detail': 'amount_paid is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        paid_date = data.get('paid_date')
+        try:
+            allocation_result = loan.apply_payment_allocation(amount, paid_date)
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({
+            'detail': 'Payment allocated.',
+            'payment_id': allocation_result['payment_id'],
+            'allocated': allocation_result['allocated'],
+            'remaining_amount': allocation_result['remaining_amount'],
+        }, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['get'])
+    def report(self, request, pk=None):
+        """Return loan summary and outstanding status for reporting"""
+        loan = self.get_object()
+        return Response({
+            'loan_id': loan.id,
+            'member': loan.member.member_number,
+            'product': loan.product.name,
+            'status': loan.status,
+            'amount': str(loan.amount),
+            'term_months': loan.term_months,
+            'disbursed_amount': str(loan.disbursed_amount) if loan.disbursed_amount else None,
+            'outstanding_principal': str(loan.outstanding_principal),
+            'outstanding_balance': str(loan.outstanding_balance),
+            'total_paid': str(loan.total_paid),
+            'total_penalty_accrued': str(loan.total_penalty_accrued),
+        })
+
+    @action(detail=False, methods=['get'])
+    def loan_history(self, request):
+        """Return loan history list for the authenticated member"""
+        loans = self.get_queryset().order_by('-submitted_at')
+        serializer = LoanApplicationSerializer(loans, many=True)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'])
+    def outstanding(self, request):
+        """Return outstanding loan balances for the authenticated member"""
+        loans = self.get_queryset().filter(status__in=['approved', 'disbursed'])
+        return Response([
+            {
+                'loan_id': loan.id,
+                'product': loan.product.name,
+                'status': loan.status,
+                'outstanding_principal': str(loan.outstanding_principal),
+                'outstanding_balance': str(loan.outstanding_balance),
+            }
+            for loan in loans
+        ])
+
+    @action(detail=False, methods=['get'])
+    def active_loans(self, request):
+        """Return active loan records for the authenticated member"""
+        loans = self.get_queryset().filter(status__in=['approved', 'disbursed'])
+        serializer = LoanApplicationSerializer(loans, many=True)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'])
+    def loan_report(self, request):
+        """Return aggregated loan status report for the authenticated member"""
+        loans = self.get_queryset()
+        total_applications = loans.count()
+        total_disbursed = loans.filter(status='disbursed').count()
+        total_outstanding = sum([loan.outstanding_balance for loan in loans if loan.status in ['approved', 'disbursed']])
+        return Response({
+            'total_applications': total_applications,
+            'total_disbursed': total_disbursed,
+            'total_outstanding_balance': str(total_outstanding),
+        })
+
+    @action(detail=False, methods=['get'])
+    def options(self, request):
+        """Return loan workflow options and statuses"""
+        return Response({
+            'statuses': [choice[0] for choice in LoanApplication.STATUS_CHOICES],
+            'payment_statuses': ['paid', 'overdue', 'pending', 'upcoming'],
         })
 
 
@@ -439,13 +590,14 @@ class StatementsExportView(generics.RetrieveAPIView):
 
     def retrieve(self, request, *args, **kwargs):
         member = request.user.member_profile
-        format_type = request.query_params.get('format', 'csv')
+        format_type = request.query_params.get('format', 'csv').lower().strip().rstrip('/')
         
         transactions = TransactionRecord.objects.filter(member=member).order_by('-created_at')
         
         if format_type == 'csv':
             output = BytesIO()
-            writer = csv.writer(output)
+            text_output = StringIO()
+            writer = csv.writer(text_output)
             writer.writerow(['Date', 'Type', 'Amount', 'Reference', 'Notes'])
             
             for txn in transactions:
@@ -457,8 +609,27 @@ class StatementsExportView(generics.RetrieveAPIView):
                     txn.notes
                 ])
             
+            output.write(text_output.getvalue().encode('utf-8'))
             output.seek(0)
             filename = f"statement_{member.member_number}_{datetime.now().strftime('%Y%m%d')}.csv"
-            return FileResponse(output, as_attachment=True, filename=filename)
-        
-        return Response({'error': 'Format not supported'}, status=status.HTTP_400_BAD_REQUEST)
+            return FileResponse(output, as_attachment=True, filename=filename, content_type='text/csv')
+
+        if format_type == 'xlsx':
+            try:
+                output = _render_statement_xlsx(member, transactions)
+            except ImportError as exc:
+                return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+            filename = f"statement_{member.member_number}_{datetime.now().strftime('%Y%m%d')}.xlsx"
+            return FileResponse(output, as_attachment=True, filename=filename, content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+        if format_type == 'pdf':
+            try:
+                output = _render_statement_pdf(member, transactions)
+            except ImportError as exc:
+                return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+            filename = f"statement_{member.member_number}_{datetime.now().strftime('%Y%m%d')}.pdf"
+            return FileResponse(output, as_attachment=True, filename=filename, content_type='application/pdf')
+
+        return Response({'error': 'Format not supported. Available formats are csv, xlsx, pdf.'}, status=status.HTTP_400_BAD_REQUEST)

@@ -3,12 +3,14 @@ from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 from decimal import Decimal
 from datetime import date
+from unittest.mock import patch
 
 from members.models import Member, Branch
 from contributions.models import (
-    TransactionRecord, ContributionPlan, ShareProduct, 
-    DividendRule, AuditLog
+    TransactionRecord, ContributionPlan, ShareProduct,
+    DividendRule, AuditLog, BusinessRule, LedgerEntry, TransactionReversal
 )
+from loans.models import LoanProduct
 
 User = get_user_model()
 
@@ -71,6 +73,33 @@ class ContributionEngineTestCase(TestCase):
             results = data.get('results', [])
         self.assertGreater(len(results), 0)
         self.assertEqual(float(results[0]['amount']), 5000.0)
+
+    def test_member_can_post_contribution(self):
+        """Test member can submit a contribution"""
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            '/api/members/contributions/',
+            {
+                'amount': '1500.00',
+                'reference': 'MEM-CONTRIB-001',
+                'notes': 'Member contribution via form',
+            },
+            format='json'
+        )
+
+        self.assertEqual(response.status_code, 201)
+        data = response.json()
+        self.assertEqual(data['transaction_type'], 'contribution')
+        self.assertEqual(float(data['amount']), 1500.0)
+        self.assertEqual(data['reference'], 'MEM-CONTRIB-001')
+
+        transaction = TransactionRecord.objects.filter(
+            member=self.member,
+            transaction_type='contribution',
+            reference='MEM-CONTRIB-001'
+        ).first()
+        self.assertIsNotNone(transaction)
+        self.assertEqual(transaction.amount, Decimal('1500.00'))
 
     def test_member_can_get_contribution_summary(self):
         """Test member can get summary of their contributions"""
@@ -144,6 +173,169 @@ class ContributionEngineTestCase(TestCase):
         audit_logs = AuditLog.objects.filter(user=self.admin_user)
         self.assertEqual(audit_logs.count(), 1)
         self.assertIn('Posted contribution', audit_logs.first().action)
+
+    def test_transaction_creation_records_ledger_and_reversal_history(self):
+        """Test transactions create ledger entries and reversal history."""
+        self.client.force_authenticate(user=self.admin_user)
+
+        transaction = TransactionRecord.objects.create(
+            member=self.member,
+            transaction_type='contribution',
+            amount=Decimal('2500.00'),
+            reference='AUDIT-001',
+            notes='Audit trail test',
+            created_by=self.admin_user,
+        )
+
+        self.assertTrue(LedgerEntry.objects.filter(transaction=transaction, entry_type='credit').exists())
+
+        transaction.mark_status(status='reversed', actor=self.admin_user, reason='Test reversal')
+
+        self.assertEqual(transaction.status, 'reversed')
+        self.assertTrue(TransactionReversal.objects.filter(transaction=transaction).exists())
+        self.assertTrue(LedgerEntry.objects.filter(transaction=transaction, entry_type='reversal').exists())
+
+        response = self.client.get('/api/members/admin/audit/')
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn('ledger_entries', data)
+        self.assertIn('audit_logs', data)
+        self.assertIn('approval_history', data)
+
+
+class ContributionPaymentApiTestCase(TestCase):
+    """Test member contribution payment flows via cash and MPesa"""
+
+    def setUp(self):
+        self.branch = Branch.objects.create(name='Payment Branch', location='Nairobi')
+        self.user = User.objects.create_user(
+            email='paymember@test.com',
+            full_name='Pay Member',
+            password='testpass123',
+            role='member'
+        )
+        self.member = Member.objects.create(
+            user=self.user,
+            member_number='MEMPAY001',
+            branch=self.branch,
+            status='active',
+            phone='254712345678',
+        )
+        self.client = APIClient()
+
+    def test_member_can_record_cash_contribution_payment(self):
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post('/api/members/contributions/pay/', {
+            'payment_method': 'cash',
+            'amount': '1500.00',
+            'reference': 'CASH-001',
+            'notes': 'Cash contribution',
+        }, format='json')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['status'], 'posted')
+        self.assertTrue(TransactionRecord.objects.filter(member=self.member, reference='CASH-001').exists())
+
+    def test_member_can_initiate_mpesa_contribution_payment(self):
+        self.client.force_authenticate(user=self.user)
+
+        with patch('contributions.views._initiate_mpesa_stk_push', return_value={
+            'MerchantRequestID': 'MR123',
+            'CheckoutRequestID': 'CR123',
+            'ResponseDescription': 'Success',
+        }):
+            response = self.client.post('/api/members/contributions/pay/', {
+                'payment_method': 'mpesa',
+                'amount': '2500.00',
+                'phone_number': '254712345678',
+                'reference': 'MPESA-001',
+                'notes': 'MPesa contribution',
+            }, format='json')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['status'], 'initiated')
+        self.assertTrue(TransactionRecord.objects.filter(member=self.member, reference='MPESA-001').exists())
+
+    def test_mpesa_phone_number_is_normalized(self):
+        from contributions.views import _normalize_phone_number
+
+        self.assertEqual(_normalize_phone_number('0712345678'), '254712345678')
+        self.assertEqual(_normalize_phone_number('+254712345678'), '254712345678')
+        self.assertEqual(_normalize_phone_number('254712345678'), '254712345678')
+
+
+class AdminConfigurationApiTestCase(TestCase):
+    """Test admin configuration endpoints for rules and deadlines"""
+
+    def setUp(self):
+        self.admin_user = User.objects.create_user(
+            email='admin-config@test.com',
+            full_name='Admin Config User',
+            password='testpass123',
+            role='admin'
+        )
+        self.client = APIClient()
+
+    def test_admin_can_fetch_and_create_rules_configuration(self):
+        self.client.force_authenticate(user=self.admin_user)
+
+        response = self.client.get('/api/members/admin/config/')
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn('loan_products', data)
+        self.assertIn('contribution_plans', data)
+        self.assertIn('deadlines', data)
+        self.assertIn('notification_templates', data)
+        self.assertIn('business_rules', data)
+
+        create_response = self.client.post('/api/members/admin/config/', {
+            'resource': 'loan_products',
+            'name': 'Emergency Loan',
+            'description': 'Short-term emergency loan',
+            'min_amount': '1000.00',
+            'max_amount': '50000.00',
+            'interest_rate': '12.50',
+            'duration_months': 6,
+            'eligibility_criteria': 'Active member',
+            'active': True,
+        }, format='json')
+
+        self.assertEqual(create_response.status_code, 201)
+        payload = create_response.json()
+        self.assertEqual(payload['name'], 'Emergency Loan')
+        self.assertEqual(LoanProduct.objects.count(), 1)
+
+        business_rule_response = self.client.post('/api/members/admin/config/', {
+            'resource': 'business_rules',
+            'name': 'Approval Workflow',
+            'key': 'approval_workflow',
+            'value': '{"stages": ["review", "approval", "disbursement"]}',
+            'description': 'Editable workflow stages',
+            'active': True,
+        }, format='json')
+
+        self.assertEqual(business_rule_response.status_code, 201)
+        business_rule = BusinessRule.objects.get(key='approval_workflow')
+        self.assertEqual(business_rule.name, 'Approval Workflow')
+
+        update_response = self.client.put('/api/members/admin/config/', {
+            'resource': 'loan_products',
+            'id': LoanProduct.objects.get(name='Emergency Loan').id,
+            'name': 'Emergency Loan',
+            'description': 'Updated emergency loan terms',
+            'min_amount': '1000.00',
+            'max_amount': '60000.00',
+            'interest_rate': '13.50',
+            'duration_months': 6,
+            'eligibility_criteria': 'Active member',
+            'active': True,
+        }, format='json')
+
+        self.assertEqual(update_response.status_code, 200)
+        updated_product = LoanProduct.objects.get(id=LoanProduct.objects.get(name='Emergency Loan').id)
+        self.assertEqual(updated_product.max_amount, Decimal('60000.00'))
+        self.assertEqual(updated_product.interest_rate, Decimal('13.50'))
 
 
 class ShareEngineTestCase(TestCase):
@@ -316,6 +508,19 @@ class ReportingEngineTestCase(TestCase):
             password='testpass123',
             role='admin'
         )
+
+        self.user = User.objects.create_user(
+            email='member-base@test.com',
+            full_name='Base Member',
+            password='testpass123',
+            role='member'
+        )
+        self.member = Member.objects.create(
+            user=self.user,
+            member_number='MEMBASE',
+            branch=self.branch1,
+            status='active'
+        )
         
         self.client = APIClient()
 
@@ -379,3 +584,43 @@ class ReportingEngineTestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertGreater(len(data), 0)
+
+    def test_admin_can_export_member_balance_csv(self):
+        """Test admin can export member balances as CSV"""
+        self.client.force_authenticate(user=self.admin_user)
+        response = self.client.get('/api/members/admin/reports/member-balance/?format=csv')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response['Content-Type'], 'text/csv')
+        self.assertIn('attachment;', response['Content-Disposition'])
+        self.assertIn('member_balances_', response['Content-Disposition'])
+
+    def test_member_can_download_statement_csv(self):
+        """Test member can download account statement as CSV"""
+        TransactionRecord.objects.create(
+            member=self.member,
+            transaction_type='contribution',
+            amount=Decimal('2500'),
+            reference='STAT-001',
+            notes='Statement line test'
+        )
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get('/api/members/statements/export/?format=csv')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response['Content-Type'], 'text/csv')
+        self.assertIn('attachment;', response['Content-Disposition'])
+        self.assertIn('statement_', response['Content-Disposition'])
+
+    def test_member_can_download_statement_csv_when_format_has_trailing_slash(self):
+        """Test statement export still works when the format query has a trailing slash"""
+        TransactionRecord.objects.create(
+            member=self.member,
+            transaction_type='contribution',
+            amount=Decimal('2500'),
+            reference='STAT-002',
+            notes='Trailing slash export test'
+        )
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get('/api/members/statements/export/?format=csv/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response['Content-Type'], 'text/csv')
+        self.assertIn('attachment;', response['Content-Disposition'])
